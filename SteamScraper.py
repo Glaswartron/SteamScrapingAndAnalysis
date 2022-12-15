@@ -9,9 +9,9 @@ import HardwareParser
 
 ''' Settings '''
 csv_path = "SteamData.csv" # (Relative) Path to the output file that is being generated / overwritten
-batches = 128 # How many chunks of games (size ~50) to pull from Steam
-multithreaded = True # Whether to use multithreading to speed things up
-max_workers = 16 # For multithreading: Number of threads to be created within the ThreadPoolExecutor
+batches = 256 # How many chunks of games (size ~50) to pull from Steam
+multithreaded = True # Whether to use multithreading to speed things up. Disabling multithreading is good for debugging.
+max_workers = 16 # For multithreading: Maximum number of threads to be created within the ThreadPoolExecutor
 verbose = True # Whether to log stuff to stdout
 
 def main():
@@ -54,7 +54,9 @@ def main():
         '''
         for i in range(0, batches):
             game_infos = [] # List of dicts with all the data for every game
+            if verbose: print(f"\nGetting games in batch {i} [{time.time() - start_time}s]\n")
             get_games(game_infos, i) # !
+            if verbose: print(f"\nGetting data for games in batch {i} [{time.time() - start_time}s]\n")
             for game_info in game_infos:
                 get_more_data(game_info) # !
             write_data_to_csv_file(game_infos)
@@ -70,7 +72,7 @@ def get_games(game_info : dict, offset : int):
     '''
     link = f"https://store.steampowered.com/search/results/?query=&start={offset*50}&count=50&dynamic_data=&sort_by=_ASC&os=win&snr=1_7_7_7000_7&filter=topsellers&infinite=1"
     listPageRequest = requests.get(link)
-    html = json.loads(listPageRequest.text)["results_html"]
+    html = json.loads(listPageRequest.content)["results_html"]
     listPageSoup = bs(html, "lxml")
     gameRows = listPageSoup.find_all("a", {"class" : "search_result_row ds_collapse_flag"})
     for gameRow in gameRows:
@@ -81,7 +83,6 @@ def get_games(game_info : dict, offset : int):
         )
 
 # ----------------------------------------
-
 def get_more_data(game_info : dict):
     '''
     Retrieves much more data about each game in game_info by
@@ -91,32 +92,66 @@ def get_more_data(game_info : dict):
     game_page_request = requests.get(game_info["url"])
     game_page_soup = bs(game_page_request.content, "lxml")
 
+    get_price(game_info, game_page_soup)
     get_release_date(game_info, game_page_soup)
     get_sys_reqs(game_info, game_page_soup)
     get_ratings(game_info, game_page_soup)
     get_genre(game_info, game_page_soup)
 
-def get_sys_reqs(game_info : dict, game_page_soup : bs):
-    game_info["sys_reqs_min"] = {"OS" : "", "Processor" : "", "Graphics" : "", "Memory" : "", "Storage" : ""}
-    game_info["sys_reqs_rec"] = {"OS" : "", "Processor" : "", "Graphics" : "", "Memory" : "", "Storage" : ""}
-    sys_req_div = game_page_soup.find("div", {"class" : "game_area_sys_req sysreq_content active", "data-os" : "win"})
-    min_col = sys_req_div.select_one(".game_area_sys_req_leftCol")
-    rec_col = sys_req_div.select_one(".game_area_sys_req_rightCol")
-    min_items = min_col.find_all("li")
-    rec_items = rec_col.find_all("li")
-    for item in min_items:
-        reqStrs = item.get_text().split(":")
-        if (len(reqStrs) == 2):
-            game_info["sys_reqs_min"][reqStrs[0].strip()] = reqStrs[1].strip()
-    for item in rec_items:
-        reqStrs = item.get_text().split(":")
-        if (len(reqStrs) == 2):
-            game_info["sys_reqs_rec"][reqStrs[0].strip()] = reqStrs[1].strip()
+def get_price(game_info : dict, game_page_soup : bs):
+    price_div = game_page_soup.find("div", {"class" : "game_purchase_price price"})
+    if price_div != None:
+        price = price_div.text.strip() # strip is important
+        if price.lower() == "free to play":
+            price = "0"
+            game_info["price"] = price
+            return
+        price = price.replace(price[-1], "")
+        price = price.replace(",", ".")
+        if not all(map(lambda s: s.isnumeric(), price.split("."))):
+            price = ""
+        game_info["price"] = price
+    else:
+        price_div = game_page_soup.find("div", {"class" : "discount_original_price"})
+        if price_div != None:
+            price = price_div.text.strip() # strip is important
+            if price.lower() == "free to play":
+                price = "0"
+                game_info["price"] = price
+                return
+            price = price.replace(price[-1], "")
+            price = price.replace(",", ".")
+            if not all(map(lambda s: s.isnumeric(), price.split("."))):
+                price = ""
+            game_info["price"] = price
 
 def get_release_date(game_info : dict, game_page_soup : bs):
     release_date_div = game_page_soup.select_one(".release_date .date")
     if release_date_div != None:
         game_info["release_date"] = release_date_div.string
+
+def get_sys_reqs(game_info : dict, game_page_soup : bs):
+    game_info["sys_reqs_min"] = {"OS" : "", "Processor" : "", "Graphics" : "", "Memory" : "", "Storage" : ""}
+    game_info["sys_reqs_rec"] = {"OS" : "", "Processor" : "", "Graphics" : "", "Memory" : "", "Storage" : ""}
+    sys_req_div = game_page_soup.find("div", {"class" : "game_area_sys_req sysreq_content active", "data-os" : "win"})
+    if sys_req_div == None:
+        return
+    min_col = sys_req_div.select_one(".game_area_sys_req_leftCol")
+    rec_col = sys_req_div.select_one(".game_area_sys_req_rightCol")
+    if min_col != None:
+        min_items = min_col.find_all("li")
+        if min_items != None:
+            for item in min_items:
+                reqStrs = item.get_text().split(":")
+                if (len(reqStrs) == 2):
+                    game_info["sys_reqs_min"][reqStrs[0].strip()] = reqStrs[1].strip()
+    if rec_col != None:
+        rec_items = rec_col.find_all("li")
+        if rec_items != None:
+            for item in rec_items:
+                reqStrs = item.get_text().split(":")
+                if (len(reqStrs) == 2):
+                    game_info["sys_reqs_rec"][reqStrs[0].strip()] = reqStrs[1].strip()
 
 def get_ratings(game_info : dict, game_page_soup : bs):
     ratings_meta = game_page_soup.find("meta", itemprop="ratingValue")
@@ -130,15 +165,15 @@ def get_genre(game_info : dict, game_page_soup : bs):
     genres_and_manufacturer_div = game_page_soup.find("div", {"id" : "genresAndManufacturer"})
     if genres_and_manufacturer_div != None:
         genres_span = genres_and_manufacturer_div.find("span")
-        first_genre_link = genres_span.find_next("a")
-        if first_genre_link != None:
-            game_info["genre0"] = first_genre_link.string
-            second_genre_link = first_genre_link.findNextSibling("a")
-            if second_genre_link != None:
-                game_info["genre1"] = second_genre_link.string
+        if genres_span != None:
+            first_genre_link = genres_span.find_next("a")
+            if first_genre_link != None:
+                game_info["genre0"] = first_genre_link.string
+                second_genre_link = first_genre_link.findNextSibling("a")
+                if second_genre_link != None:
+                    game_info["genre1"] = second_genre_link.string
 
 # ----------------------------------------
-
 
 def prepare_csv_file():
     '''
@@ -147,7 +182,7 @@ def prepare_csv_file():
     if os.path.exists(csv_path):
         os.remove(csv_path)
     with open(csv_path, "w", encoding="utf-16") as csv_file:
-        column_names = ["Name", "Release date", "Genre 1", "Genre 2", "Rating", "Rating count", "Min OS", "Min Processor", "Min Graphics", "Min Graphics NVIDIA", "Min Graphics AMD", "Min Memory", "Min Storage", "Rec OS", "Rec Processor", "Rec Graphics", "Rec Graphics NVIDIA", "Rec Graphics AMD", "Rec Memory", "Rec Storage"]
+        column_names = ["Name", "Price", "Release date", "Genre 1", "Genre 2", "Rating", "Rating count", "Min OS", "Min Processor", "Min Graphics", "Min Graphics NVIDIA", "Min Graphics AMD", "Min Memory", "Min Storage", "Rec OS", "Rec Processor", "Rec Graphics", "Rec Graphics NVIDIA", "Rec Graphics AMD", "Rec Memory", "Rec Storage"]
         csv_file.write(",".join(column_names) + "\n")
 
 def write_data_to_csv_file(game_infos : list[dict]):
@@ -158,6 +193,7 @@ def write_data_to_csv_file(game_infos : list[dict]):
     with open(csv_path, "a", encoding="utf-16") as csv_file:
         for game_info in game_infos:
             name = game_info["name"]
+            price = game_info.get("price", "")
             release_date = game_info.get("release_date", "")
             genre0 = game_info.get("genre0", "")
             genre1 = game_info.get("genre1", "")
@@ -176,6 +212,7 @@ def write_data_to_csv_file(game_infos : list[dict]):
             genre0 = genre0.replace('"', '""')
             genre1 = genre1.replace('"', '""')
             csv_file.write(f'"{name}"')
+            csv_file.write("," + f'"{price}"')
             csv_file.write("," + f'"{release_date}"')
             csv_file.write("," + f'"{genre0}"')
             csv_file.write("," + f'"{genre1}"')
